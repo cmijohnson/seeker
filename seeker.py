@@ -296,7 +296,19 @@ def start_server():
         utils.print(f'{C}[ {R}FAILED{C} ]{W}')
         utils.print(f'{R}[-] {C}Template directory not found: {template_dir}{W}')
         sys.exit(1)
-    _http_server = create_server(port, template_dir, _session_manager)
+
+    # Build config for dashboard API
+    redirect_url = getenv('REDIRECT', 'https://news.google.com/')
+    server_config = {
+        'template': SITE,
+        'port': port,
+        'tunnel': tunnel_provider,
+        'redirect': redirect_url,
+        'local_url': f'http://127.0.0.1:{port}',
+        'public_url': '',
+    }
+
+    _http_server = create_server(port, template_dir, _session_manager, server_config)
 
     # Health check
     import threading
@@ -579,6 +591,12 @@ def main():
     SITE = template_select(SITE)
     session_manager = start_server()
     start_tunnel()
+
+    # Update config with tunnel URL
+    if _http_server and hasattr(_http_server, 'RequestHandlerClass'):
+        cfg = _http_server.RequestHandlerClass._config
+        if cfg and _tunnel_url:
+            cfg['public_url'] = _tunnel_url
 
     # Print dashboard URL
     local_dash = f'http://127.0.0.1:{port}/dashboard'
