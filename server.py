@@ -160,6 +160,7 @@ class SeekerHandler(SimpleHTTPRequestHandler):
             'IMAGE': 'https://via.placeholder.com/1200x630',
             'DESC': 'Example description',
         },
+        'university': {},
     }
 
     def _handle_template_switch(self, data):

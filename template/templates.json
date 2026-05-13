@@ -49,6 +49,11 @@
             "name": "Local News",
             "dir_name": "news_local",
             "import_file": "mod_news_local"
+        },
+        {
+            "name": "University Portal",
+            "dir_name": "university",
+            "import_file": "mod_university"
         }
 
     ]
